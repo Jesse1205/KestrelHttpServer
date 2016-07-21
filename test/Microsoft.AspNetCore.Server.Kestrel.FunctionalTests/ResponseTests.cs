@@ -179,24 +179,65 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
                 using (var client = new HttpClient())
                 {
                     var response = await client.GetAsync($"http://localhost:{host.GetPort()}/");
-                    
+
                     // Despite the error, the response had already started
                     Assert.Equal(HttpStatusCode.OK, response.StatusCode);
                     Assert.NotNull(ex);
                 }
             }
         }
-                
+
         [Fact]
-        public async Task ResponseStatusCodeSetBeforeHttpContextDispose()
+        public Task ResponseStatusCodeSetBeforeHttpContextDisposeAppException()
+        {
+            return ResponseStatusCodeSetBeforeHttpContextDispose(
+                context =>
+                {
+                    throw new Exception();
+                },
+                expectedClientStatusCode: HttpStatusCode.InternalServerError,
+                expectedServerStatusCode: HttpStatusCode.InternalServerError);
+        }
+
+        [Fact]
+        public Task ResponseStatusCodeSetBeforeHttpContextDisposeRequestAborted()
+        {
+            return ResponseStatusCodeSetBeforeHttpContextDispose(
+                context =>
+                {
+                    context.Abort();
+                    return TaskCache.CompletedTask;
+                },
+                expectedClientStatusCode: null,
+                expectedServerStatusCode: HttpStatusCode.OK);
+        }
+
+        [Fact]
+        public Task ResponseStatusCodeSetBeforeHttpContextDisposeRequestAbortedAppException()
+        {
+            return ResponseStatusCodeSetBeforeHttpContextDispose(
+                context =>
+                {
+                    context.Abort();
+                    throw new Exception();
+                },
+                expectedClientStatusCode: null,
+                expectedServerStatusCode: HttpStatusCode.InternalServerError);
+        }
+
+        private static async Task ResponseStatusCodeSetBeforeHttpContextDispose(RequestDelegate handler,
+            HttpStatusCode? expectedClientStatusCode, HttpStatusCode expectedServerStatusCode)
         {
             var mockHttpContextFactory = new Mock<IHttpContextFactory>();
             mockHttpContextFactory.Setup(f => f.Create(It.IsAny<IFeatureCollection>()))
                 .Returns<IFeatureCollection>(fc => new DefaultHttpContext(fc));
 
-            int disposedStatusCode = -1;
+            var disposedTcs = new TaskCompletionSource<int>();
             mockHttpContextFactory.Setup(f => f.Dispose(It.IsAny<HttpContext>()))
-                .Callback<HttpContext>(c => disposedStatusCode = c.Response.StatusCode);
+                .Callback<HttpContext>(c =>
+                {
+                    disposedTcs.TrySetResult(c.Response.StatusCode);
+                });
 
             var hostBuilder = new WebHostBuilder()
                 .UseKestrel()
@@ -204,10 +245,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
                 .ConfigureServices(services => services.AddSingleton<IHttpContextFactory>(mockHttpContextFactory.Object))
                 .Configure(app =>
                 {
-                    app.Run(context =>
-                    {
-                        throw new Exception();
-                    });
+                    app.Run(handler);
                 });
 
             using (var host = hostBuilder.Build())
@@ -216,12 +254,24 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
 
                 using (var client = new HttpClient())
                 {
-                    var response = await client.GetAsync($"http://localhost:{host.GetPort()}/");
-                    Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+                    try
+                    {
+                        var response = await client.GetAsync($"http://localhost:{host.GetPort()}/");
+                        Assert.Equal(expectedClientStatusCode, response.StatusCode);
+                    }
+                    catch
+                    {
+                        if (expectedClientStatusCode != null)
+                        {
+                            throw;
+                        }
+                    }
                 }
-            }
 
-            Assert.Equal(HttpStatusCode.InternalServerError, (HttpStatusCode)disposedStatusCode);
+                var disposedStatusCode = await disposedTcs.Task.TimeoutAfter(TimeSpan.FromSeconds(10));
+
+                Assert.Equal(expectedServerStatusCode, (HttpStatusCode)disposedStatusCode);
+            }
         }
 
         // https://github.com/aspnet/KestrelHttpServer/pull/1111/files#r80584475 explains the reason for this test.
