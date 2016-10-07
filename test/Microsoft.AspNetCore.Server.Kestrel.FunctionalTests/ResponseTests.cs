@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -225,8 +226,24 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
                 expectedServerStatusCode: HttpStatusCode.InternalServerError);
         }
 
-        private static async Task ResponseStatusCodeSetBeforeHttpContextDispose(RequestDelegate handler,
-            HttpStatusCode? expectedClientStatusCode, HttpStatusCode expectedServerStatusCode)
+        [Fact]
+        public Task ResponseStatusCodeSetBeforeHttpContextDisposedRequestMalformed()
+        {
+            return ResponseStatusCodeSetBeforeHttpContextDispose(
+                context =>
+                {
+                    return TaskCache.CompletedTask;
+                },
+                expectedClientStatusCode: null,
+                expectedServerStatusCode: HttpStatusCode.BadRequest,
+                sendMalformedRequest: true);
+        }
+
+        private static async Task ResponseStatusCodeSetBeforeHttpContextDispose(
+            RequestDelegate handler,
+            HttpStatusCode? expectedClientStatusCode,
+            HttpStatusCode expectedServerStatusCode,
+            bool sendMalformedRequest = false)
         {
             var mockHttpContextFactory = new Mock<IHttpContextFactory>();
             mockHttpContextFactory.Setup(f => f.Create(It.IsAny<IFeatureCollection>()))
@@ -252,24 +269,38 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
             {
                 host.Start();
 
-                using (var client = new HttpClient())
+                if (!sendMalformedRequest)
                 {
-                    try
+                    using (var client = new HttpClient())
                     {
-                        var response = await client.GetAsync($"http://localhost:{host.GetPort()}/");
-                        Assert.Equal(expectedClientStatusCode, response.StatusCode);
-                    }
-                    catch
-                    {
-                        if (expectedClientStatusCode != null)
+                        try
                         {
-                            throw;
+                            var response = await client.GetAsync($"http://localhost:{host.GetPort()}/");
+                            Assert.Equal(expectedClientStatusCode, response.StatusCode);
                         }
+                        catch
+                        {
+                            if (expectedClientStatusCode != null)
+                            {
+                                throw;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                    {
+                        socket.Connect(new IPEndPoint(IPAddress.Loopback, host.GetPort()));
+                        socket.Send(Encoding.ASCII.GetBytes(
+                            "POST / HTTP/1.1\r\n" +
+                            "Transfer-Encoding: chunked\r\n" +
+                            "\r\n" +
+                            "wrong"));
                     }
                 }
 
                 var disposedStatusCode = await disposedTcs.Task.TimeoutAfter(TimeSpan.FromSeconds(10));
-
                 Assert.Equal(expectedServerStatusCode, (HttpStatusCode)disposedStatusCode);
             }
         }

@@ -125,25 +125,29 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Internal.Http
                                 await FireOnCompleted();
                             }
 
-                            // If _requestAbort is set, the connection has already been closed.
-                            if (Volatile.Read(ref _requestAborted) == 0)
+                            try
                             {
-                                ResumeStreams();
-
-                                if (_keepAlive)
+                                // If _requestAbort is set, the connection has already been closed.
+                                if (Volatile.Read(ref _requestAborted) == 0)
                                 {
-                                    // Finish reading the request body in case the app did not.
-                                    await messageBody.Consume();
+                                    ResumeStreams();
+
+                                    if (_keepAlive)
+                                    {
+                                        // Finish reading the request body in case the app did not.
+                                        await messageBody.Consume();
+                                    }
                                 }
 
+                                // ProduceEnd() must be called before _application.DisposeContext(), to ensure
+                                // HttpContext.Response.StatusCode is correctly set when
+                                // IHttpContextFactory.Dispose(HttpContext) is called.
+                                await ProduceEnd();
                             }
-
-                            // ProduceEnd() must be called before _application.DisposeContext(), to ensure
-                            // HttpContext.Response.StatusCode is correctly set when
-                            // IHttpContextFactory.Dispose(HttpContext) is called.
-                            await ProduceEnd();
-
-                            _application.DisposeContext(context, _applicationException);
+                            finally
+                            {
+                                _application.DisposeContext(context, _applicationException);
+                            }
                         }
 
                         StopStreams();
