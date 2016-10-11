@@ -210,7 +210,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
                     return TaskCache.CompletedTask;
                 },
                 expectedClientStatusCode: null,
-                expectedServerStatusCode: HttpStatusCode.OK);
+                expectedServerStatusCode: 0);
         }
 
         [Fact]
@@ -223,7 +223,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
                     throw new Exception();
                 },
                 expectedClientStatusCode: null,
-                expectedServerStatusCode: HttpStatusCode.InternalServerError);
+                expectedServerStatusCode: 0);
         }
 
         [Fact]

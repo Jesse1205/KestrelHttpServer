@@ -91,24 +91,25 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Internal.Http
                         var context = _application.CreateContext(this);
                         try
                         {
-                            await _application.ProcessRequestAsync(context).ConfigureAwait(false);
-
-                            var responseHeaders = FrameResponseHeaders;
-                            if (!responseHeaders.HasTransferEncoding &&
-                                responseHeaders.HasContentLength &&
-                                _responseBytesWritten < responseHeaders.HeaderContentLengthValue.Value)
+                            try
                             {
-                                _keepAlive = false;
-                                ReportApplicationError(new InvalidOperationException(
-                                    $"Response Content-Length mismatch: too few bytes written ({_responseBytesWritten} of {responseHeaders.HeaderContentLengthValue.Value})."));
+                                await _application.ProcessRequestAsync(context).ConfigureAwait(false);
+
+                                var responseHeaders = FrameResponseHeaders;
+                                if (!responseHeaders.HasTransferEncoding &&
+                                    responseHeaders.HasContentLength &&
+                                    _responseBytesWritten < responseHeaders.HeaderContentLengthValue.Value)
+                                {
+                                    _keepAlive = false;
+                                    ReportApplicationError(new InvalidOperationException(
+                                        $"Response Content-Length mismatch: too few bytes written ({_responseBytesWritten} of {responseHeaders.HeaderContentLengthValue.Value})."));
+                                }
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            ReportApplicationError(ex);
-                        }
-                        finally
-                        {
+                            catch (Exception ex)
+                            {
+                                ReportApplicationError(ex);
+                            }
+
                             // Trigger OnStarting if it hasn't been called yet and the app hasn't
                             // already failed. If an OnStarting callback throws we can go through
                             // our normal error handling in ProduceEnd.
@@ -125,18 +126,15 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Internal.Http
                                 await FireOnCompleted();
                             }
 
-                            try
+                            // If _requestAbort is set, the connection has already been closed.
+                            if (Volatile.Read(ref _requestAborted) == 0)
                             {
-                                // If _requestAbort is set, the connection has already been closed.
-                                if (Volatile.Read(ref _requestAborted) == 0)
-                                {
-                                    ResumeStreams();
+                                ResumeStreams();
 
-                                    if (_keepAlive)
-                                    {
-                                        // Finish reading the request body in case the app did not.
-                                        await messageBody.Consume();
-                                    }
+                                if (_keepAlive)
+                                {
+                                    // Finish reading the request body in case the app did not.
+                                    await messageBody.Consume();
                                 }
 
                                 // ProduceEnd() must be called before _application.DisposeContext(), to ensure
@@ -144,19 +142,25 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Internal.Http
                                 // IHttpContextFactory.Dispose(HttpContext) is called.
                                 await ProduceEnd();
                             }
-                            finally
+                            else if (!HasResponseStarted)
                             {
-                                _application.DisposeContext(context, _applicationException);
+                                // If the request was aborted and no response was sent, there's no
+                                // meaningful status code to log.
+                                StatusCode = 0;
                             }
                         }
-
-                        StopStreams();
-
-                        if (!_keepAlive)
+                        finally
                         {
-                            // End the connection for non keep alive as data incoming may have been thrown off
-                            return;
+                            _application.DisposeContext(context, _applicationException);
                         }
+                    }
+
+                    StopStreams();
+
+                    if (!_keepAlive)
+                    {
+                        // End the connection for non keep alive as data incoming may have been thrown off
+                        return;
                     }
 
                     // Don't reset frame state if we're exiting the loop. This avoids losing request rejection
